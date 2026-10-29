@@ -258,26 +258,25 @@ def extrair_csvs() -> None:
  
  
 def gerar_amostras() -> None:
-    """Gera amostras de 2000 linhas de cada CSV."""
+    """Gera amostras de aproximadamente TAMANHO_AMOSTRA linhas de cada CSV."""
     PASTA_AMOSTRAS.mkdir(parents=True, exist_ok=True)
- 
     for nome_arquivo in TABELAS:
         origem = PASTA_RAW / nome_arquivo
         if not origem.exists():
             continue
- 
         destino = PASTA_AMOSTRAS / nome_arquivo.replace(".csv", "_sample.csv")
+        escritas = 0
         with open(
             origem, "r", encoding=ENCODING_CSV, errors="replace"
         ) as entrada, open(
             destino, "w", encoding=ENCODING_CSV, newline=""
         ) as saida:
             for indice, linha in enumerate(entrada):
-                if indice >= TAMANHO_AMOSTRA:
+                if indice > TAMANHO_AMOSTRA:
                     break
                 saida.write(linha)
- 
-        logger.info("Amostra gerada (%d linhas): %s", TAMANHO_AMOSTRA, destino)
+                escritas += 1
+        logger.info("Amostra gerada (%d linhas): %s", escritas, destino)
  
  
 def ler_em_blocos(caminho: Path, colunas: list[str]) -> Iterator[list[tuple]]:
