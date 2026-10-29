@@ -15,20 +15,33 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Iterator
- 
+
 import psycopg2
 from psycopg2.extras import execute_values
- 
+
 from banco import conectar
-from config import PASTA_AMOSTRAS, PASTA_LOGS, PASTA_RAIZ, URL_ZIP
- 
-TAMANHO_BLOCO = 50_000
+from config import (
+    CSV_ENCODING,
+    CSV_SEPARADOR,
+    DRIVE_FILE_ID,
+    PASTA_DADOS,
+    PASTA_RAIZ,
+    TAMANHO_BLOCO,
+)
+
 TAMANHO_AMOSTRA = 2_000
- 
-ENCODING_CSV = "latin-1"
-DELIMITADOR_CSV = ";"
- 
-PASTA_RAW = PASTA_RAIZ / "data" / "raw"
+
+# Aliases locais para legibilidade no corpo do script.
+ENCODING_CSV = CSV_ENCODING
+DELIMITADOR_CSV = CSV_SEPARADOR
+
+# Pastas derivadas de PASTA_DADOS / PASTA_RAIZ (nao existem no config.py).
+PASTA_RAW = PASTA_DADOS / "raw"
+PASTA_AMOSTRAS = PASTA_DADOS / "amostras"
+PASTA_LOGS = PASTA_RAIZ / "logs"
+
+# URL montada a partir do DRIVE_FILE_ID real do config.py.
+URL_ZIP = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
 ARQUIVO_ZIP = PASTA_RAW / "viagens_2025_6meses.zip"
  
 # As listas abaixo seguem a ORDEM EXATA dos cabecalhos dos CSVs.
