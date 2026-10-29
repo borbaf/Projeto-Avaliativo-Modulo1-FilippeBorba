@@ -4,6 +4,10 @@
 # Dados brutos volumosos - baixados por 1_extrair.py
 data/raw/
 *.zip
+backup_raw.sql
+*.sql.bak
+backup_*.sql
+
 
 # macOS
 .DS_Store

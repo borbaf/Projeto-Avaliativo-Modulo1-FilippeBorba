@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
-"""Extração e carga da camada RAW do pipeline Medallion.
- 
-Baixa o arquivo oficial de viagens do Portal da Transparência (Drive),
-extrai os CSVs, gera amostras e carrega as tabelas raw em blocos,
-controlando o uso de memória.
 """
-
+Pipeline de extracao da camada Raw.
+ 
+Baixa o arquivo ZIP com os CSVs de viagens a servico, extrai os arquivos,
+gera amostras e carrega tudo no PostgreSQL em blocos de 50 mil linhas.
+ 
+Uso:
+    python 1_extrair.py
+"""
+ 
 import csv
 import logging
 import sys
@@ -13,21 +15,25 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Iterator
-
+ 
 import psycopg2
 from psycopg2.extras import execute_values
-
+ 
 from banco import conectar
 from config import PASTA_AMOSTRAS, PASTA_LOGS, PASTA_RAIZ, URL_ZIP
-
+ 
 TAMANHO_BLOCO = 50_000
 TAMANHO_AMOSTRA = 2_000
-
+ 
+ENCODING_CSV = "latin-1"
+DELIMITADOR_CSV = ";"
+ 
 PASTA_RAW = PASTA_RAIZ / "data" / "raw"
 ARQUIVO_ZIP = PASTA_RAW / "viagens_2025_6meses.zip"
-
+ 
 # As listas abaixo seguem a ORDEM EXATA dos cabecalhos dos CSVs.
-# Qualquer divergencia de tamanho e detectada por validar_cabecalho().
+# Qualquer divergencia de tamanho e detectada por validar_cabecalho(),
+# que aborta ANTES do TRUNCATE para nao apagar dados sem necessidade.
 TABELAS = {
     "2025_Viagem.csv": (
         "raw_viagem",
@@ -115,13 +121,13 @@ TABELAS = {
         ],
     ),
 }
-
-
+ 
+ 
 def configurar_log() -> None:
     """Configura o logger para arquivo e console."""
     PASTA_LOGS.mkdir(parents=True, exist_ok=True)
     formato = "%(asctime)s %(levelname)s %(message)s"
-
+ 
     logging.basicConfig(
         level=logging.INFO,
         format=formato,
@@ -130,30 +136,30 @@ def configurar_log() -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
-
-
+ 
+ 
 def contar_linhas(caminho: Path) -> int:
     """
     Conta as linhas de dados do CSV, descontando o cabecalho.
-
+ 
     Args:
         caminho: Caminho do arquivo CSV.
-
+ 
     Returns:
         Numero de linhas de dados.
     """
-    with open(caminho, "r", encoding="latin-1", errors="replace") as arquivo:
+    with open(caminho, "r", encoding=ENCODING_CSV, errors="replace") as arquivo:
         total = sum(1 for _ in arquivo)
     return max(total - 1, 0)
-
-
+ 
+ 
 def formatar_duracao(segundos: float) -> str:
     """
     Formata segundos em mm:ss ou hh:mm:ss.
-
+ 
     Args:
         segundos: Duracao em segundos.
-
+ 
     Returns:
         String formatada.
     """
@@ -163,63 +169,66 @@ def formatar_duracao(segundos: float) -> str:
     if horas:
         return f"{horas}h{minutos:02d}m{seg:02d}s"
     return f"{minutos}m{seg:02d}s"
-
-
+ 
+ 
 def barra_progresso(percentual: float, largura: int = 30) -> str:
     """
     Gera uma barra de progresso textual.
-
+ 
     Args:
         percentual: Valor de 0 a 100.
         largura: Numero de caracteres da barra.
-
+ 
     Returns:
         String com a barra preenchida.
     """
     preenchido = int(largura * percentual / 100)
     return "#" * preenchido + "." * (largura - preenchido)
-
-
+ 
+ 
 def validar_cabecalho(caminho: Path, colunas: list[str]) -> None:
     """
     Valida que o cabecalho do CSV tem exatamente o numero de colunas esperado.
-
+ 
     Protege contra desalinhamento silencioso: se o CSV tiver mais colunas
     do que a lista, os valores seriam deslocados e o dado corrompido.
-
+    Roda ANTES do TRUNCATE, para nao apagar dados sem necessidade.
+ 
     Args:
         caminho: Caminho do arquivo CSV.
         colunas: Lista de colunas esperadas.
-
+ 
     Raises:
         ValueError: Se a contagem de colunas do cabecalho divergir.
     """
-    with open(caminho, "r", encoding="latin-1", errors="replace", newline="") as arquivo:
-        leitor = csv.reader(arquivo, delimiter=";")
+    with open(
+        caminho, "r", encoding=ENCODING_CSV, errors="replace", newline=""
+    ) as arquivo:
+        leitor = csv.reader(arquivo, delimiter=DELIMITADOR_CSV)
         cabecalho = next(leitor, [])
-
+ 
     if len(cabecalho) != len(colunas):
         raise ValueError(
             f"{caminho.name}: cabecalho tem {len(cabecalho)} colunas, "
             f"mas a lista espera {len(colunas)}. "
             f"Ajuste TABELAS antes de carregar."
         )
-
-
+ 
+ 
 def baixar_zip() -> None:
     """Baixa o arquivo ZIP se ainda nao existir."""
     PASTA_RAW.mkdir(parents=True, exist_ok=True)
-
+ 
     if ARQUIVO_ZIP.exists():
         logger.info("Reaproveitando zip ja existente: %s", ARQUIVO_ZIP)
         return
-
+ 
     logger.info("Baixando arquivo de %s", URL_ZIP)
     import gdown
-
+ 
     gdown.download(URL_ZIP, str(ARQUIVO_ZIP), quiet=False)
-
-
+ 
+ 
 def extrair_csvs() -> None:
     """Extrai os CSVs do ZIP para a pasta raw."""
     with zipfile.ZipFile(ARQUIVO_ZIP) as pacote:
@@ -230,57 +239,62 @@ def extrair_csvs() -> None:
             with pacote.open(nome) as origem, open(destino, "wb") as saida:
                 saida.write(origem.read())
             logger.info("Extraido: %s", destino)
-
-
+ 
+ 
 def gerar_amostras() -> None:
     """Gera amostras de 2000 linhas de cada CSV."""
     PASTA_AMOSTRAS.mkdir(parents=True, exist_ok=True)
-
+ 
     for nome_arquivo in TABELAS:
         origem = PASTA_RAW / nome_arquivo
         if not origem.exists():
             continue
-
+ 
         destino = PASTA_AMOSTRAS / nome_arquivo.replace(".csv", "_sample.csv")
-        with open(origem, "r", encoding="latin-1", errors="replace") as entrada, \
-             open(destino, "w", encoding="latin-1", newline="") as saida:
+        with open(
+            origem, "r", encoding=ENCODING_CSV, errors="replace"
+        ) as entrada, open(
+            destino, "w", encoding=ENCODING_CSV, newline=""
+        ) as saida:
             for indice, linha in enumerate(entrada):
                 if indice > TAMANHO_AMOSTRA:
                     break
                 saida.write(linha)
-
+ 
         logger.info("Amostra gerada (%d linhas): %s", TAMANHO_AMOSTRA, destino)
-
-
+ 
+ 
 def ler_em_blocos(caminho: Path, colunas: list[str]) -> Iterator[list[tuple]]:
     """
     Le o CSV em blocos de TAMANHO_BLOCO linhas.
-
+ 
     Args:
         caminho: Caminho do CSV.
         colunas: Lista de colunas esperadas.
-
+ 
     Yields:
         Lista de tuplas prontas para insercao.
     """
-    with open(caminho, "r", encoding="latin-1", errors="replace", newline="") as arquivo:
-        leitor = csv.reader(arquivo, delimiter=";")
+    with open(
+        caminho, "r", encoding=ENCODING_CSV, errors="replace", newline=""
+    ) as arquivo:
+        leitor = csv.reader(arquivo, delimiter=DELIMITADOR_CSV)
         next(leitor, None)
-
+ 
         bloco: list[tuple] = []
         for linha in leitor:
             if len(linha) < len(colunas):
                 linha = linha + [""] * (len(colunas) - len(linha))
             bloco.append(tuple(linha[: len(colunas)]))
-
+ 
             if len(bloco) >= TAMANHO_BLOCO:
                 yield bloco
                 bloco = []
-
+ 
         if bloco:
             yield bloco
-
-
+ 
+ 
 def inserir_bloco(
     conexao,
     tabela: str,
@@ -289,13 +303,13 @@ def inserir_bloco(
 ) -> tuple[int, int, int]:
     """
     Insere um bloco de linhas na tabela.
-
+ 
     Args:
         conexao: Conexao ativa com o PostgreSQL.
         tabela: Nome da tabela destino.
         colunas: Lista de colunas.
         bloco: Linhas a inserir.
-
+ 
     Returns:
         Tupla (lidas, inseridas, descartadas).
     """
@@ -309,8 +323,8 @@ def inserir_bloco(
         conexao.rollback()
         logger.error("%s: bloco descartado (%s)", tabela, erro)
         return len(bloco), 0, len(bloco)
-
-
+ 
+ 
 def carregar_csv(
     conexao,
     caminho: Path,
@@ -319,33 +333,33 @@ def carregar_csv(
 ) -> dict:
     """
     Carrega um CSV inteiro na tabela, com log de progresso por bloco.
-
+ 
     Args:
         conexao: Conexao ativa.
         caminho: Caminho do CSV.
         tabela: Nome da tabela destino.
         colunas: Lista de colunas.
-
+ 
     Returns:
         Dicionario com o resumo da carga.
     """
     logger.info("Carregando %s -> %s", caminho.name, tabela)
-
+ 
     validar_cabecalho(caminho, colunas)
-
+ 
     total_linhas = contar_linhas(caminho)
     logger.info("%s: %d linhas a carregar", tabela, total_linhas)
-
+ 
     total_lidas = 0
     total_inseridas = 0
     total_descartadas = 0
     blocos = 0
     inicio = time.time()
-
+ 
     with conexao.cursor() as cursor:
-        cursor.execute(f"TRUNCATE TABLE {tabela}")
+        cursor.execute(f"TRUNCATE TABLE {tabela} RESTART IDENTITY")
     conexao.commit()
-
+ 
     for bloco in ler_em_blocos(caminho, colunas):
         blocos += 1
         lidas, inseridas, descartadas = inserir_bloco(
@@ -354,14 +368,16 @@ def carregar_csv(
         total_lidas += lidas
         total_inseridas += inseridas
         total_descartadas += descartadas
-
+ 
         decorrido = time.time() - inicio
-        percentual = (total_lidas / total_linhas * 100) if total_linhas else 100.0
+        percentual = (
+            min(total_lidas / total_linhas * 100, 100.0) if total_linhas else 100.0
+        )
         velocidade = total_lidas / decorrido if decorrido > 0 else 0
         restante = (
             (total_linhas - total_lidas) / velocidade if velocidade > 0 else 0
         )
-
+ 
         logger.info(
             "%s [%s] %5.1f%% | bloco %d | %d/%d linhas | %s decorrido | ~%s restante",
             tabela,
@@ -373,7 +389,7 @@ def carregar_csv(
             formatar_duracao(decorrido),
             formatar_duracao(restante),
         )
-
+ 
     duracao = time.time() - inicio
     logger.info(
         "%s: lidas=%d inseridas=%d descartadas=%d blocos=%d tempo=%s",
@@ -384,7 +400,7 @@ def carregar_csv(
         blocos,
         formatar_duracao(duracao),
     )
-
+ 
     return {
         "tabela": tabela,
         "lidas": total_lidas,
@@ -393,20 +409,20 @@ def carregar_csv(
         "blocos": blocos,
         "duracao": duracao,
     }
-
-
+ 
+ 
 def main() -> None:
     """Executa o pipeline completo de extracao."""
     configurar_log()
     logger.info("Inicio do pipeline de extracao")
-
+ 
     baixar_zip()
     extrair_csvs()
     gerar_amostras()
-
+ 
     conexao = conectar()
     resumos = []
-
+ 
     try:
         for nome_arquivo, (tabela, colunas) in TABELAS.items():
             caminho = PASTA_RAW / nome_arquivo
@@ -416,14 +432,14 @@ def main() -> None:
             resumos.append(carregar_csv(conexao, caminho, tabela, colunas))
     finally:
         conexao.close()
-
+ 
     logger.info("=" * 70)
     logger.info("RESUMO FINAL")
     logger.info("=" * 70)
-
+ 
     total_geral = 0
     tempo_geral = 0.0
-
+ 
     for resumo in resumos:
         logger.info(
             "%-16s %9d linhas | %2d blocos | %s",
@@ -434,7 +450,7 @@ def main() -> None:
         )
         total_geral += resumo["inseridas"]
         tempo_geral += resumo["duracao"]
-
+ 
     logger.info("-" * 70)
     logger.info(
         "%-16s %9d linhas | %s",
@@ -443,8 +459,7 @@ def main() -> None:
         formatar_duracao(tempo_geral),
     )
     logger.info("Pipeline concluido com sucesso")
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
- 
