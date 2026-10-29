@@ -232,17 +232,36 @@ def validar_cabecalho(caminho: Path, colunas: list[str]) -> None:
  
  
 def baixar_zip() -> None:
-    """Baixa o arquivo ZIP se ainda nao existir."""
+    """
+    Baixa o arquivo ZIP se ainda nao existir.
+
+    Reaproveita o arquivo local quando presente, evitando download
+    redundante em reexecucoes do pipeline.
+
+    Raises:
+        RuntimeError: Se o download falhar ou nao gerar o arquivo esperado.
+    """
     PASTA_RAW.mkdir(parents=True, exist_ok=True)
- 
+
     if ARQUIVO_ZIP.exists():
         logger.info("Reaproveitando zip ja existente: %s", ARQUIVO_ZIP)
         return
- 
+
     logger.info("Baixando arquivo de %s", URL_ZIP)
-    import gdown
- 
-    gdown.download(URL_ZIP, str(ARQUIVO_ZIP), quiet=False)
+    try:
+        import gdown
+
+        gdown.download(URL_ZIP, str(ARQUIVO_ZIP), quiet=False)
+    except Exception as erro:
+        raise RuntimeError(
+            f"Falha ao baixar o arquivo de {URL_ZIP}: {erro}. "
+            f"Verifique a conexao ou baixe manualmente para {ARQUIVO_ZIP}."
+        ) from erro
+
+    if not ARQUIVO_ZIP.exists():
+        raise RuntimeError(
+            f"Download nao gerou o arquivo esperado: {ARQUIVO_ZIP}"
+        )
  
  
 def extrair_csvs() -> None:
