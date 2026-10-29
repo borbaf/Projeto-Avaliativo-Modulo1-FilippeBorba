@@ -42,4 +42,4 @@ data/*.zip
 
 # Documentos internos de planejamento (nao fazem parte do entregavel)
 Contexto_Projeto_Avaliativo_M1S13.docx
-
+*.docx
