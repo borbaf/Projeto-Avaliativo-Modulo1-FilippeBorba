@@ -12,10 +12,9 @@ services:
     container_name: transparencia_postgres
     restart: unless-stopped
     environment:
-      # Credenciais lidas de variáveis de ambiente, com defaults seguros.
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-transparencia}
+      POSTGRES_DB: ${POSTGRES_DATABASE:-transparencia}
     ports:
       - "5432:5432"
     volumes:
