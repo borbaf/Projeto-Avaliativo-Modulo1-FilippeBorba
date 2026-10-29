@@ -29,3 +29,8 @@ env/
 
 # Logs
 logs/*.log
+
+# Pastas de instalacao e extracao que nao pertencem ao repositorio
+data/_PostgreSQL-*/
+data/viagens_2025_6meses/
+data/*.zip
