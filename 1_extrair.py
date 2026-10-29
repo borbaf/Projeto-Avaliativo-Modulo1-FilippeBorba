@@ -6,397 +6,367 @@ extrai os CSVs, gera amostras e carrega as tabelas raw em blocos,
 controlando o uso de memória.
 """
  
-import argparse
+
 import csv
 import logging
-import shutil
 import sys
+import time
 import zipfile
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
  
-import gdown
 import psycopg2
+from psycopg2.extras import execute_values
  
-from config import (
-    ARQUIVOS,
-    CSV_ENCODING,
-    CSV_SEPARADOR,
-    DRIVE_FILE_ID,
-    PASTA_DADOS,
-    TAMANHO_BLOCO,
-)
-from banco import conectar, executar, inserir_em_lote
+from banco import conectar
+from config import PASTA_AMOSTRAS, PASTA_LOGS, PASTA_RAIZ, URL_ZIP
+ 
+TAMANHO_BLOCO = 50_000
+TAMANHO_AMOSTRA = 2_000
+ 
+PASTA_RAW = PASTA_RAIZ / "data" / "raw"
+ARQUIVO_ZIP = PASTA_RAW / "viagens_2025_6meses.zip"
+ 
+TABELAS = {
+    "2025_Viagem.csv": (
+        "raw_viagem",
+        [
+            "id_viagem", "num_proposta", "situacao", "viagem_urgente",
+            "cod_orgao_superior", "nome_orgao_superior", "cod_orgao_solicitante",
+            "nome_orgao_solicitante", "nome_viajante", "cargo", "data_inicio",
+            "data_fim", "destinos", "motivo", "valor_diarias", "valor_passagens",
+            "valor_devolucao", "valor_outros_gastos",
+        ],
+    ),
+    "2025_Pagamento.csv": (
+        "raw_pagamento",
+        [
+            "id_viagem", "num_proposta", "cod_orgao_superior",
+            "nome_orgao_superior", "cod_orgao_pagador", "nome_orgao_pagador",
+            "tipo_pagamento", "valor", "data_pagamento",
+        ],
+    ),
+    "2025_Passagem.csv": (
+        "raw_passagem",
+        [
+            "id_viagem", "num_proposta", "meio_transporte", "pais_origem_ida",
+            "uf_origem_ida", "cidade_origem_ida", "pais_destino_ida",
+            "uf_destino_ida", "cidade_destino_ida", "valor_passagem",
+            "taxa_servico", "data_emissao",
+        ],
+    ),
+    "2025_Trecho.csv": (
+        "raw_trecho",
+        [
+            "id_viagem", "num_proposta", "sequencia_trecho", "origem_data",
+            "origem_uf", "origem_cidade", "destino_data", "destino_uf",
+            "destino_cidade", "meio_transporte", "numero_diarias",
+        ],
+    ),
+}
  
  
-# --------------------------------------------------------------------------- #
-# Exceções do domínio
-# --------------------------------------------------------------------------- #
-class ExtracaoError(Exception):
-    """Exceção base para erros do pipeline de extração."""
+def configurar_log() -> None:
+    """Configura o logger para arquivo e console."""
+    PASTA_LOGS.mkdir(parents=True, exist_ok=True)
+    formato = "%(asctime)s %(levelname)s %(message)s"
  
- 
-class DownloadError(ExtracaoError):
-    """Falha no download do arquivo zip a partir do Google Drive."""
- 
- 
-class ExtracaoZipError(ExtracaoError):
-    """Arquivo zip inválido ou sem os CSVs esperados."""
- 
- 
-class CargaRawError(ExtracaoError):
-    """Falha durante a carga das tabelas raw no PostgreSQL."""
- 
- 
-# --------------------------------------------------------------------------- #
-# Constantes
-# --------------------------------------------------------------------------- #
-NOME_ZIP = "viagens_2025_6meses.zip"
-PASTA_RAW = PASTA_DADOS / "raw"
-PASTA_AMOSTRAS = PASTA_DADOS / "amostras"
-LINHAS_AMOSTRA = 2000
-ORDEM_CARGA = ("viagem", "pagamento", "passagem", "trecho")
- 
- 
-# --------------------------------------------------------------------------- #
-# Logging
-# --------------------------------------------------------------------------- #
-def configurar_logging(nivel: str) -> None:
-    """Configura o logging global do script.
- 
-    Args:
-        nivel: nível de log (DEBUG, INFO, WARNING, ERROR).
-    """
-    pasta_logs = Path("logs")
-    pasta_logs.mkdir(exist_ok=True)
     logging.basicConfig(
-        level=getattr(logging, nivel.upper()),
-        format="%(asctime)s %(levelname)s %(message)s",
+        level=logging.INFO,
+        format=formato,
         handlers=[
-            logging.FileHandler(pasta_logs / "1_extrair.log", encoding="utf-8"),
-            logging.StreamHandler(),
+            logging.FileHandler(PASTA_LOGS / "extracao.log", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
         ],
     )
  
  
-# --------------------------------------------------------------------------- #
-# Download e extração
-# --------------------------------------------------------------------------- #
-def baixar_zip(destino: Path, file_id: str, forcar: bool = False) -> Path:
-    """Baixa o zip oficial do Google Drive (reaproveita se já existir).
+def contar_linhas(caminho: Path) -> int:
+    """
+    Conta as linhas de dados do CSV, descontando o cabecalho.
  
     Args:
-        destino: caminho completo do arquivo zip de destino.
-        file_id: id do arquivo no Google Drive.
-        forcar: se True, baixa novamente mesmo que o arquivo exista.
+        caminho: Caminho do arquivo CSV.
  
     Returns:
-        Caminho do arquivo zip.
- 
-    Raises:
-        DownloadError: quando o download falha.
+        Numero de linhas de dados.
     """
-    if destino.exists() and not forcar:
-        logging.info("Reaproveitando zip já existente: %s", destino)
-        return destino
-    url = f"https://drive.google.com/uc?id={file_id}"
-    ok = gdown.download(url=url, output=str(destino), quiet=False)
-    if not ok or not destino.exists():
-        raise DownloadError(
-            "Falha no download. Coloque o zip manualmente em data/raw/ "
-            f"com o nome {NOME_ZIP} e execute novamente."
-        )
-    logging.info("Download concluído: %s", destino)
-    return destino
- 
- 
-def extrair_zip(caminho_zip: Path, destino: Path) -> dict[str, Path]:
-    """Extrai apenas os membros .csv do zip, preservando o nome do arquivo.
- 
-    Args:
-        caminho_zip: caminho do arquivo zip.
-        destino: pasta de destino da extração.
- 
-    Returns:
-        Dicionário mapeando nome do CSV para o Path extraído.
- 
-    Raises:
-        ExtracaoZipError: se o zip for inválido ou não contiver CSVs.
-    """
-    destino.mkdir(parents=True, exist_ok=True)
-    arquivos: dict[str, Path] = {}
-    try:
-        with zipfile.ZipFile(caminho_zip) as zip_ref:
-            membros = [m for m in zip_ref.namelist() if m.endswith(".csv")]
-            if not membros:
-                raise ExtracaoZipError(f"O zip {caminho_zip} não contém CSVs.")
-            for membro in membros:
-                nome = Path(membro).name  # preserva só o nome do arquivo
-                destino_csv = destino / nome
-                with zip_ref.open(membro) as origem, destino_csv.open("wb") as saida:
-                    shutil.copyfileobj(origem, saida, length=1_048_576)  # blocos de 1 MB
-                arquivos[nome] = destino_csv
-                logging.info("Extraído: %s", destino_csv)
-    except zipfile.BadZipFile as exc:
-        raise ExtracaoZipError(f"Arquivo zip inválido: {caminho_zip}") from exc
-    return arquivos
- 
- 
-def gerar_amostras(
-    arquivos_csv: dict[str, Path], destino: Path, linhas: int = LINHAS_AMOSTRA
-) -> dict[str, Path]:
-    """Gera amostras dos CSVs preservando os bytes originais.
- 
-    A leitura/escrita em modo binário preserva os bytes originais, garantindo
-    fidelidade ao encoding (latin-1) dos arquivos do Portal da Transparência.
- 
-    Args:
-        arquivos_csv: dicionário nome -> Path dos CSVs completos.
-        destino: pasta onde as amostras serão gravadas.
-        linhas: número de linhas (incluindo cabeçalho) por amostra.
- 
-    Returns:
-        Dicionário nome da amostra -> Path.
-    """
-    destino.mkdir(parents=True, exist_ok=True)
-    amostras: dict[str, Path] = {}
-    for nome, caminho in arquivos_csv.items():
-        nome_amostra = nome.replace(".csv", "_sample.csv")
-        caminho_amostra = destino / nome_amostra
-        copiadas = 0
-        with caminho.open("rb") as origem, caminho_amostra.open("wb") as saida:
-            for _ in range(linhas):
-                linha = origem.readline()
-                if not linha:
-                    break
-                saida.write(linha)
-                copiadas += 1
-        amostras[nome_amostra] = caminho_amostra
-        logging.info("Amostra gerada (%d linhas): %s", copiadas, caminho_amostra)
-    return amostras
- 
- 
-# --------------------------------------------------------------------------- #
-# Leitura e carga em blocos
-# --------------------------------------------------------------------------- #
-def contar_linhas_csv(caminho: Path) -> int:
-    """Conta as linhas de dados do CSV (descontando o cabeçalho).
- 
-    Args:
-        caminho: caminho do arquivo CSV.
- 
-    Returns:
-        Número de linhas de dados.
-    """
-    with caminho.open("r", encoding=CSV_ENCODING, newline="") as arquivo:
+    with open(caminho, "r", encoding="utf-8", errors="replace") as arquivo:
         total = sum(1 for _ in arquivo)
     return max(total - 1, 0)
  
  
-def ler_em_blocos(caminho: Path, tamanho_bloco: int) -> Iterator[list[tuple[str, ...]]]:
-    """Lê o CSV em blocos de tamanho fixo, como tuplas de strings.
- 
-    A leitura em blocos mantém o consumo de memória constante, mesmo com
-    arquivos de milhões de linhas.
+def formatar_duracao(segundos: float) -> str:
+    """
+    Formata segundos em mm:ss ou hh:mm:ss.
  
     Args:
-        caminho: caminho do arquivo CSV.
-        tamanho_bloco: número máximo de linhas por bloco.
+        segundos: Duracao em segundos.
+ 
+    Returns:
+        String formatada.
+    """
+    segundos = int(segundos)
+    horas, resto = divmod(segundos, 3600)
+    minutos, seg = divmod(resto, 60)
+    if horas:
+        return f"{horas}h{minutos:02d}m{seg:02d}s"
+    return f"{minutos}m{seg:02d}s"
+ 
+ 
+def barra_progresso(percentual: float, largura: int = 30) -> str:
+    """
+    Gera uma barra de progresso textual.
+ 
+    Args:
+        percentual: Valor de 0 a 100.
+        largura: Numero de caracteres da barra.
+ 
+    Returns:
+        String com a barra preenchida.
+    """
+    preenchido = int(largura * percentual / 100)
+    return "#" * preenchido + "." * (largura - preenchido)
+ 
+ 
+def baixar_zip() -> None:
+    """Baixa o arquivo ZIP se ainda nao existir."""
+    PASTA_RAW.mkdir(parents=True, exist_ok=True)
+ 
+    if ARQUIVO_ZIP.exists():
+        logger.info("Reaproveitando zip ja existente: %s", ARQUIVO_ZIP)
+        return
+ 
+    logger.info("Baixando arquivo de %s", URL_ZIP)
+    import gdown
+ 
+    gdown.download(URL_ZIP, str(ARQUIVO_ZIP), quiet=False)
+ 
+ 
+def extrair_csvs() -> None:
+    """Extrai os CSVs do ZIP para a pasta raw."""
+    with zipfile.ZipFile(ARQUIVO_ZIP) as pacote:
+        for nome in pacote.namelist():
+            if not nome.lower().endswith(".csv"):
+                continue
+            destino = PASTA_RAW / Path(nome).name
+            with pacote.open(nome) as origem, open(destino, "wb") as saida:
+                saida.write(origem.read())
+            logger.info("Extraido: %s", destino)
+ 
+ 
+def gerar_amostras() -> None:
+    """Gera amostras de 2000 linhas de cada CSV."""
+    PASTA_AMOSTRAS.mkdir(parents=True, exist_ok=True)
+ 
+    for nome_arquivo in TABELAS:
+        origem = PASTA_RAW / nome_arquivo
+        if not origem.exists():
+            continue
+ 
+        destino = PASTA_AMOSTRAS / nome_arquivo.replace(".csv", "_sample.csv")
+        with open(origem, "r", encoding="utf-8", errors="replace") as entrada, \
+             open(destino, "w", encoding="utf-8", newline="") as saida:
+            escritor = csv.writer(saida)
+            for indice, linha in enumerate(entrada):
+                if indice > TAMANHO_AMOSTRA:
+                    break
+                saida.write(linha)
+ 
+        logger.info("Amostra gerada (%d linhas): %s", TAMANHO_AMOSTRA, destino)
+ 
+ 
+def ler_em_blocos(caminho: Path, colunas: list[str]) -> Iterator[list[tuple]]:
+    """
+    Le o CSV em blocos de TAMANHO_BLOCO linhas.
+ 
+    Args:
+        caminho: Caminho do CSV.
+        colunas: Lista de colunas esperadas.
  
     Yields:
-        Blocos (listas) de tuplas de strings.
+        Lista de tuplas prontas para insercao.
     """
-    with caminho.open("r", encoding=CSV_ENCODING, newline="") as arquivo:
-        leitor = csv.reader(arquivo, delimiter=CSV_SEPARADOR)
-        cabecalho = next(leitor, None)
-        if cabecalho is None:
-            return
-        largura = len(cabecalho)
-        bloco: list[tuple[str, ...]] = []
-        descartes = 0
+    with open(caminho, "r", encoding="utf-8", errors="replace", newline="") as arquivo:
+        leitor = csv.reader(arquivo)
+        next(leitor, None)
+ 
+        bloco: list[tuple] = []
         for linha in leitor:
-            if len(linha) != largura:
-                descartes += 1
-                continue
-            bloco.append(tuple(campo for campo in linha))
-            if len(bloco) >= tamanho_bloco:
+            if len(linha) < len(colunas):
+                linha = linha + [""] * (len(colunas) - len(linha))
+            bloco.append(tuple(linha[: len(colunas)]))
+ 
+            if len(bloco) >= TAMANHO_BLOCO:
                 yield bloco
                 bloco = []
-        if descartes:
-            logging.warning(
-                "%s: %d linhas descartadas por número de campos diferente do cabeçalho",
-                caminho.name, descartes,
-            )
+ 
         if bloco:
             yield bloco
  
  
-def truncar_tabela(conexao, tabela: str) -> None:
-    """Esvazia a tabela raw antes da carga (idempotência da execução).
- 
-    Args:
-        conexao: conexão psycopg2 ativa.
-        tabela: nome da tabela raw.
-    """
-    executar(conexao, f"TRUNCATE TABLE {tabela} RESTART IDENTITY CASCADE")
- 
- 
-def obter_colunas_tabela(conexao, tabela: str) -> list[str]:
-    """Retorna as colunas reais da tabela, via information_schema.
- 
-    Consultar o information_schema evita hardcode da lista de colunas:
-    o INSERT se adapta automaticamente ao DDL do banco.
- 
-    Args:
-        conexao: conexão psycopg2 ativa.
-        tabela: nome da tabela.
- 
-    Returns:
-        Lista de nomes de colunas na ordem do DDL.
-    """
-    with conexao.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = %s
-            ORDER BY ordinal_position
-            """,
-            (tabela,),
-        )
-        return [registro[0] for registro in cursor.fetchall()]
- 
- 
-def carregar_tabela(
+def inserir_bloco(
     conexao,
-    caminho_csv: Path,
     tabela: str,
-    colunas: Sequence[str],
-    tamanho_bloco: int,
-) -> dict[str, int]:
-    """Carrega um CSV na tabela raw usando INSERT em lote.
+    colunas: list[str],
+    bloco: list[tuple],
+) -> tuple[int, int, int]:
+    """
+    Insere um bloco de linhas na tabela.
  
     Args:
-        conexao: conexão psycopg2 ativa.
-        caminho_csv: caminho do CSV a carregar.
-        tabela: nome da tabela raw de destino.
-        colunas: colunas da tabela na ordem do INSERT.
-        tamanho_bloco: tamanho de cada bloco de linhas.
+        conexao: Conexao ativa com o PostgreSQL.
+        tabela: Nome da tabela destino.
+        colunas: Lista de colunas.
+        bloco: Linhas a inserir.
  
     Returns:
-        Métricas da carga (linhas_lidas, linhas_inseridas,
-        linhas_descartadas, blocos_processados).
- 
-    Raises:
-        CargaRawError: quando a carga falha (rollback garantido).
+        Tupla (lidas, inseridas, descartadas).
     """
-    metricas = {
-        "linhas_lidas": 0,
-        "linhas_inseridas": 0,
-        "linhas_descartadas": 0,
-        "blocos_processados": 0,
-    }
-    placeholders = ", ".join(["%s"] * len(colunas))
-    lista_colunas = ", ".join(colunas)
-    sql_insert = f"INSERT INTO {tabela} ({lista_colunas}) VALUES ({placeholders})"
-    try:
-        for bloco in ler_em_blocos(caminho_csv, tamanho_bloco):
-            inserir_em_lote(conexao, sql_insert, bloco)
-            metricas["linhas_lidas"] += len(bloco)
-            metricas["linhas_inseridas"] += len(bloco)
-            metricas["blocos_processados"] += 1
-        conexao.commit()
-    except Exception as exc:
-        conexao.rollback()
-        raise CargaRawError(f"Falha ao carregar {tabela}: {exc}") from exc
-    return metricas
- 
- 
-# --------------------------------------------------------------------------- #
-# Pipeline
-# --------------------------------------------------------------------------- #
-def executar_pipeline(forcar_download: bool, gerar_amostras_flag: bool, nivel_log: str) -> int:
-    """Executa o pipeline completo de extração e carga RAW.
- 
-    Args:
-        forcar_download: força novo download do zip.
-        gerar_amostras_flag: gera amostras dos CSVs quando True.
-        nivel_log: nível de logging configurado.
- 
-    Returns:
-        0 em caso de sucesso, 1 em caso de falha.
-    """
-    configurar_logging(nivel_log)
-    logging.info("Início do pipeline de extração")
- 
-    PASTA_DADOS.mkdir(parents=True, exist_ok=True)
-    PASTA_RAW.mkdir(parents=True, exist_ok=True)
- 
-    caminho_zip = PASTA_RAW / NOME_ZIP
-    try:
-        baixar_zip(caminho_zip, DRIVE_FILE_ID, forcar=forcar_download)
-        arquivos_csv = extrair_zip(caminho_zip, PASTA_RAW)
-        if gerar_amostras_flag:
-            gerar_amostras(arquivos_csv, PASTA_AMOSTRAS)
- 
-        conexao = conectar()
-        try:
-            for chave in ORDEM_CARGA:
-                # ORDEM_CARGA processa primeiro a tabela-mãe (viagem),
-                # garantindo a integridade referencial da Silver.
-                nome_csv = ARQUIVOS[chave]["csv"]
-                tabela = ARQUIVOS[chave]["tabela_raw"]
-                caminho_csv = arquivos_csv.get(nome_csv)
-                if caminho_csv is None:
-                    logging.warning("CSV %s não encontrado no zip — pulando %s", nome_csv, tabela)
-                    continue
-                colunas = obter_colunas_tabela(conexao, tabela)
-                logging.info("Carregando %s -> %s", nome_csv, tabela)
-                truncar_tabela(conexao, tabela)
-                metricas = carregar_tabela(conexao, caminho_csv, tabela, colunas, TAMANHO_BLOCO)
-                logging.info(
-                    "%s: lidas=%d inseridas=%d descartadas=%d blocos=%d",
-                    tabela, metricas["linhas_lidas"], metricas["linhas_inseridas"],
-                    metricas["linhas_descartadas"], metricas["blocos_processados"],
-                )
-            logging.info("Pipeline concluído com sucesso")
-            return 0
-        finally:
-            conexao.close()
-    except Exception:
-        logging.exception("Falha no pipeline de extração")
-        return 1
- 
- 
-def main() -> int:
-    """Ponto de entrada do script.
- 
-    Returns:
-        Código de saída do processo (0 sucesso, 1 falha).
-    """
-    parser = argparse.ArgumentParser(description="Extração e carga da camada RAW")
-    parser.add_argument("--forcar-download", action="store_true", help="força novo download do zip")
-    parser.add_argument("--sem-amostras", action="store_true", help="não gera amostras dos CSVs")
-    parser.add_argument(
-        "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="nível de logging",
+    sql = (
+        f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES %s"
     )
-    args = parser.parse_args()
     try:
-        return executar_pipeline(
-            forcar_download=args.forcar_download,
-            gerar_amostras_flag=not args.sem_amostras,
-            nivel_log=args.log_level,
+        with conexao.cursor() as cursor:
+            execute_values(cursor, sql, bloco, page_size=1000)
+        conexao.commit()
+        return len(bloco), len(bloco), 0
+    except psycopg2.Error:
+        conexao.rollback()
+        return len(bloco), 0, len(bloco)
+ 
+ 
+def carregar_csv(
+    conexao,
+    caminho: Path,
+    tabela: str,
+    colunas: list[str],
+) -> dict:
+    """
+    Carrega um CSV inteiro na tabela, com log de progresso por bloco.
+ 
+    Args:
+        conexao: Conexao ativa.
+        caminho: Caminho do CSV.
+        tabela: Nome da tabela destino.
+        colunas: Lista de colunas.
+ 
+    Returns:
+        Dicionario com o resumo da carga.
+    """
+    logger.info("Carregando %s -> %s", caminho.name, tabela)
+ 
+    total_linhas = contar_linhas(caminho)
+    logger.info("%s: %d linhas a carregar", tabela, total_linhas)
+ 
+    total_lidas = 0
+    total_inseridas = 0
+    total_descartadas = 0
+    blocos = 0
+    inicio = time.time()
+ 
+    with conexao.cursor() as cursor:
+        cursor.execute(f"TRUNCATE TABLE {tabela}")
+    conexao.commit()
+ 
+    for bloco in ler_em_blocos(caminho, colunas):
+        blocos += 1
+        lidas, inseridas, descartadas = inserir_bloco(
+            conexao, tabela, colunas, bloco
         )
-    except ExtracaoError as exc:
-        logging.error("Erro de extração: %s", exc)
-        return 1
-    except Exception:
-        logging.exception("Erro inesperado")
-        return 1
+        total_lidas += lidas
+        total_inseridas += inseridas
+        total_descartadas += descartadas
+ 
+        decorrido = time.time() - inicio
+        percentual = (total_lidas / total_linhas * 100) if total_linhas else 100.0
+        velocidade = total_lidas / decorrido if decorrido > 0 else 0
+        restante = (
+            (total_linhas - total_lidas) / velocidade if velocidade > 0 else 0
+        )
+ 
+        logger.info(
+            "%s [%s] %5.1f%% | bloco %d | %d/%d linhas | %s decorrido | ~%s restante",
+            tabela,
+            barra_progresso(percentual),
+            percentual,
+            blocos,
+            total_lidas,
+            total_linhas,
+            formatar_duracao(decorrido),
+            formatar_duracao(restante),
+        )
+ 
+    duracao = time.time() - inicio
+    logger.info(
+        "%s: lidas=%d inseridas=%d descartadas=%d blocos=%d tempo=%s",
+        tabela,
+        total_lidas,
+        total_inseridas,
+        total_descartadas,
+        blocos,
+        formatar_duracao(duracao),
+    )
+ 
+    return {
+        "tabela": tabela,
+        "lidas": total_lidas,
+        "inseridas": total_inseridas,
+        "descartadas": total_descartadas,
+        "blocos": blocos,
+        "duracao": duracao,
+    }
+ 
+ 
+def main() -> None:
+    """Executa o pipeline completo de extracao."""
+    configurar_log()
+    logger.info("Inicio do pipeline de extracao")
+ 
+    baixar_zip()
+    extrair_csvs()
+    gerar_amostras()
+ 
+    conexao = conectar()
+    resumos = []
+ 
+    try:
+        for nome_arquivo, (tabela, colunas) in TABELAS.items():
+            caminho = PASTA_RAW / nome_arquivo
+            if not caminho.exists():
+                logger.warning("Arquivo ausente: %s", caminho)
+                continue
+            resumos.append(carregar_csv(conexao, caminho, tabela, colunas))
+    finally:
+        conexao.close()
+ 
+    logger.info("=" * 70)
+    logger.info("RESUMO FINAL")
+    logger.info("=" * 70)
+ 
+    total_geral = 0
+    tempo_geral = 0.0
+ 
+    for resumo in resumos:
+        logger.info(
+            "%-16s %9d linhas | %2d blocos | %s",
+            resumo["tabela"],
+            resumo["inseridas"],
+            resumo["blocos"],
+            formatar_duracao(resumo["duracao"]),
+        )
+        total_geral += resumo["inseridas"]
+        tempo_geral += resumo["duracao"]
+ 
+    logger.info("-" * 70)
+    logger.info(
+        "%-16s %9d linhas | %s",
+        "TOTAL",
+        total_geral,
+        formatar_duracao(tempo_geral),
+    )
+    logger.info("Pipeline concluido com sucesso")
  
  
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
