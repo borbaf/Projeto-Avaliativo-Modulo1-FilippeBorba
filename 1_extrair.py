@@ -273,7 +273,7 @@ def gerar_amostras() -> None:
             destino, "w", encoding=ENCODING_CSV, newline=""
         ) as saida:
             for indice, linha in enumerate(entrada):
-                if indice > TAMANHO_AMOSTRA:
+                if indice >= TAMANHO_AMOSTRA:
                     break
                 saida.write(linha)
  
