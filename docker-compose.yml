@@ -1,0 +1,42 @@
+# =============================================================================
+# docker-compose.yml — Infraestrutura do Projeto (Sprint 2)
+# Orquestra o banco de dados PostgreSQL utilizado por todo o projeto.
+# Como usar: docker compose up -d
+# =============================================================================
+ 
+
+ 
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: transparencia_postgres
+    restart: unless-stopped
+    environment:
+      # Credenciais lidas de variáveis de ambiente, com defaults seguros.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-transparencia}
+    ports:
+      - "5432:5432"
+    volumes:
+      # O SQL é montado em /docker-entrypoint-initdb.d porque o PostgreSQL
+      # executa automaticamente todos os scripts .sql desse diretório na
+      # PRIMEIRA inicialização do container — não é preciso rodar o script à mão.
+      - ./0_criar_banco.sql:/docker-entrypoint-initdb.d/01_criar_banco.sql:ro
+      # O volume nomeado persiste os dados FORA do container: mesmo que o
+      # container seja recriado ou atualizado, os dados continuam salvos.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # O healthcheck existe para que o Docker (e ferramentas como
+      # depends_on com condition: service_healthy) saibam quando o banco
+      # está realmente pronto para aceitar conexões.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d transparencia"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+ 
+# Volumes nomeados gerenciados pelo Docker (driver local padrão).
+volumes:
+  postgres_data:
+    driver: local
