@@ -29,6 +29,9 @@ from config import (
     TAMANHO_BLOCO,
 )
 
+# Logger do modulo. configurar_log() ajusta handlers e nivel.
+logger = logging.getLogger(__name__)
+
 TAMANHO_AMOSTRA = 2_000
 
 # Aliases locais para legibilidade no corpo do script.
