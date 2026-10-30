@@ -348,8 +348,8 @@ A Silver é onde o dado bruto vira dado confiável. Três operações acontecem 
 | Tabela | Lidas | Inseridas | Descartadas | Motivos |
 |---|---|---|---|---|
 | silver_viagem | 341.860 | 341.860 | 0 | — |
-| silver_passagem | 167.260 | 100.075 | 67.185 | conversão inválida + FK órfã + duplicata |
-| silver_pagamento | 606.916 | 568.403 | 38.513 | conversão inválida + FK órfã + duplicata |
+| silver_passagem | 167.260 | 100.075 | 67.185 | duplicata: 66.521; conversão inválida: 664 |
+| silver_pagamento | 606.916 | 568.403 | 38.513 | duplicata: 38.513 |
 | silver_trecho | 763.349 | 763.349 | 0 | — |
 
 ### Camada Gold — agregação sem inflação
