@@ -417,7 +417,10 @@ def carregar_tabela(
     """
     logger.info("Transformando %s -> %s", tabela_raw, tabela_silver)
  
-    executar(conexao_escrita, f"TRUNCATE TABLE {tabela_silver} RESTART IDENTITY")
+    executar(
+    conexao_escrita,
+    f"TRUNCATE TABLE {tabela_silver} RESTART IDENTITY CASCADE",
+            )
  
     lidas = 0
     inseridas = 0
