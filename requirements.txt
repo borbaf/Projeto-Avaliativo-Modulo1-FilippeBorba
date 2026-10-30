@@ -16,3 +16,5 @@ gdown
 pandas
 matplotlib
 seaborn
+pytest
+
