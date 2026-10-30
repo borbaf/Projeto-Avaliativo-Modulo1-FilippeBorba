@@ -11,3 +11,8 @@ python-dotenv>=1.0.0
 jupyter>=1.0.0
 notebook>=7.0.0
 pytest>=7.4.0
+psycopg2-binary
+gdown
+pandas
+matplotlib
+seaborn
