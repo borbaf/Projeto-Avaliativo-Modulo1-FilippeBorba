@@ -27,7 +27,7 @@ venv/
 env/
 .pytest_cache/
 .mypy_cache/
-gerar_readme.py
+
 
 # Jupyter
 .ipynb_checkpoints/
